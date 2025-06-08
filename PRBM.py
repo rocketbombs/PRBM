@@ -1,9 +1,13 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
+from torch.optim.adam import Adam
 import torchvision
 import torchvision.transforms as transforms
 from torch.utils.data import DataLoader
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend to avoid Qt issues
 import matplotlib.pyplot as plt
 import numpy as np
 import time
@@ -14,16 +18,16 @@ print(f"Using device: {DEVICE}")
 
 # RBM Hyperparameters
 N_VISIBLE = 784  # 28x28 MNIST pixels
-N_HIDDEN = 512   # Number of hidden p-bits/neurons. Try 512, 256, or even 64 to test parameter efficiency
-K_CD = 1         # Number of Gibbs sampling steps in Contrastive Divergence
-RBM_EPOCHS = 20
-RBM_BATCH_SIZE = 64
-RBM_LEARNING_RATE = 0.01 # Adjusted from 0.1, common for RBMs
+N_HIDDEN = 8   # Number of hidden p-bits/neurons. Try 512, 256, or even 64 to test parameter efficiency
+K_CD = 500        # Number of Gibbs sampling steps in Contrastive Divergence
+RBM_EPOCHS = 100
+RBM_BATCH_SIZE = 2048
+RBM_LEARNING_RATE = 0.08 
 
 # Classifier Hyperparameters
-CLASSIFIER_EPOCHS = 30
-CLASSIFIER_BATCH_SIZE = 128 # Can be larger for classifier
-CLASSIFIER_LEARNING_RATE = 0.001
+CLASSIFIER_EPOCHS = 100
+CLASSIFIER_BATCH_SIZE = 2048 # Can be larger for classifier
+CLASSIFIER_LEARNING_RATE = 0.04
 
 # --- MNIST Data Loading ---
 transform = transforms.Compose([
@@ -48,7 +52,7 @@ testloader = DataLoader(testset, batch_size=CLASSIFIER_BATCH_SIZE, shuffle=False
 class RBM(nn.Module):
     def __init__(self, n_visible, n_hidden):
         super(RBM, self).__init__()
-        self.W = nn.Parameter(torch.randn(n_hidden, n_visible) * 0.1) # Weight matrix
+        self.W = nn.Parameter(torch.randn(n_hidden, n_visible) * 0.4) # Weight matrix
         self.v_bias = nn.Parameter(torch.zeros(n_visible)) # Visible layer bias
         self.h_bias = nn.Parameter(torch.zeros(n_hidden)) # Hidden layer bias
 
@@ -106,7 +110,7 @@ print(f"RBM Parameters: {rbm_params}")
 # For manual:
 # optimizer = None 
 # For Adam (less common for pure RBMs, but can work):
-# optimizer = optim.Adam(rbm.parameters(), lr=RBM_LEARNING_RATE)
+# optimizer = torch.optim.Adam(rbm.parameters(), lr=RBM_LEARNING_RATE)
 
 start_time = time.time()
 for epoch in range(RBM_EPOCHS):
@@ -153,7 +157,7 @@ for epoch in range(RBM_EPOCHS):
         if (i + 1) % 100 == 0:
             print(f"Epoch [{epoch+1}/{RBM_EPOCHS}], Batch [{i+1}/{len(rbm_trainloader)}], Recon Loss: {loss.item():.4f}")
     
-    print(f"Epoch [{epoch+1}/{RBM_EPOCHS}] completed. Average Recon Loss: {epoch_loss/len(rbm_trainloader):.4f}")
+    print(f"Epoch [{epoch+1}/{RBM_EPOCHS}] completed. Average Recon Loss: {epoch_loss/len(rbm_trainloader):.6f}")
 
     # Optional: Visualize RBM weights or reconstructions
     if (epoch + 1) % 5 == 0:
@@ -174,7 +178,7 @@ for epoch in range(RBM_EPOCHS):
                 axes[row, col_orig*2+1].set_title("Recon")
                 axes[row, col_orig*2+1].axis('off')
             plt.suptitle(f"RBM Reconstructions Epoch {epoch+1}")
-            plt.tight_layout(rect=[0, 0, 1, 0.96])
+            plt.tight_layout(rect=(0, 0, 1, 0.96))
             plt.savefig(f"rbm_reconstructions_epoch_{epoch+1}.png")
             plt.close(fig)
         rbm.train() # Back to train mode
@@ -186,24 +190,58 @@ print(f"RBM training finished. Time: {end_time - start_time:.2f} seconds.")
 # rbm.load_state_dict(torch.load("rbm_mnist.pth"))
 
 # --- Classifier on RBM Features ---
-class Classifier(nn.Module):
-    def __init__(self, n_input, n_output):
-        super(Classifier, self).__init__()
-        self.linear = nn.Linear(n_input, n_output)
+class GrayCodeClassifier(nn.Module):
+    def __init__(self, n_input, n_bits=4):
+        super(GrayCodeClassifier, self).__init__()
+        self.linear = nn.Linear(n_input, n_bits)
+        
+        # Gray codes for digits 0-9
+        self.register_buffer('gray_codes', torch.tensor([
+            [0, 0, 0, 0],  # 0    # 0 - 6       THESE ARE SOMEWHAT ARBITRARY, BUT THEY WORK
+            [1, 0, 0, 0],  # 1    # 1 
+            [0, 1, 0, 0],  # 2    # 2 - 3
+            [0, 1, 1, 0],  # 3    # 3 - 5
+            [0, 0, 0, 1],  # 4    # 4 - 9
+            [0, 0, 1, 1],  # 5    # 5 - 6
+            [0, 1, 1, 1],  # 6    # 6 - 5
+            [1, 1, 0, 0],  # 7    # 7 - 2
+            [0, 0, 1, 0],  # 8    # 8 - 0
+            [1, 0, 0, 1],  # 9    # 9 - 4
+        ], dtype=torch.float32))
 
     def forward(self, x):
-        return self.linear(x) # Output logits
+        return torch.sigmoid(self.linear(x))  # 4 probability outputs
+    
+    def decode(self, bit_outputs):
+        # Convert 4-bit outputs to digit predictions
+        # bit_outputs: (batch_size, 4)
+        # Find closest Gray code for each sample
+        bit_outputs = bit_outputs.unsqueeze(1)  # (batch_size, 1, 4)
+        gray_codes = self.gray_codes.unsqueeze(0)  # (1, 10, 4)
+        
+        # Compute L2 distance to each Gray code
+        distances = torch.sum((bit_outputs - gray_codes) ** 2, dim=2)  # (batch_size, 10)
+        return torch.argmin(distances, dim=1)
 
-print(f"\nStarting Classifier Training (Input: {N_HIDDEN} RBM features, Output: 10 classes)")
-classifier = Classifier(N_HIDDEN, 10).to(DEVICE) # 10 classes for MNIST
-# Parameters for Classifier: linear_weights (N_HIDDEN * 10) + linear_bias (10)
-classifier_params = N_HIDDEN * 10 + 10
+# Custom loss function for Gray code
+def gray_code_loss(outputs, labels):
+    # outputs: (batch_size, 4) - predicted bit probabilities
+    # labels: (batch_size) - true digit labels
+    
+    # Get target Gray codes
+    target_codes = classifier.gray_codes[labels]  # (batch_size, 4)
+    
+    # Binary cross-entropy for each bit
+    return F.binary_cross_entropy(outputs, target_codes)
+
+print(f"\nStarting Classifier Training (Input: {N_HIDDEN} RBM features, Output: 4-bit Gray code)")
+classifier = GrayCodeClassifier(N_HIDDEN, n_bits=4).to(DEVICE)
+# Parameters for Classifier: linear_weights (N_HIDDEN * 4) + linear_bias (4)
+classifier_params = N_HIDDEN * 4 + 4
 print(f"Classifier Parameters: {classifier_params}")
 print(f"Total Parameters (RBM + Classifier): {rbm_params + classifier_params}")
 
-
-criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(classifier.parameters(), lr=CLASSIFIER_LEARNING_RATE)
+optimizer = Adam(classifier.parameters(), lr=CLASSIFIER_LEARNING_RATE)
 
 # Freeze RBM weights - we are using it as a fixed feature extractor
 rbm.eval()
@@ -220,17 +258,19 @@ for epoch in range(CLASSIFIER_EPOCHS):
 
         optimizer.zero_grad()
 
-        # Get RBM hidden activations as features (use probabilities, not samples, for stability)
+        # Get RBM hidden activations as features
         with torch.no_grad():
-            _, hidden_features = rbm.sample_h_given_v(inputs) # Using h_activation
+            _, hidden_features = rbm.sample_h_given_v(inputs)
 
-        outputs = classifier(hidden_features)
-        loss = criterion(outputs, labels)
+        outputs = classifier(hidden_features)  # 4-bit predictions
+        loss = gray_code_loss(outputs, labels)
         loss.backward()
         optimizer.step()
 
         running_loss += loss.item()
-        _, predicted = torch.max(outputs.data, 1)
+        
+        # Decode predictions
+        predicted = classifier.decode(outputs)
         total_train += labels.size(0)
         correct_train += (predicted == labels).sum().item()
         
@@ -243,19 +283,19 @@ for epoch in range(CLASSIFIER_EPOCHS):
     # Validation / Test
     correct_test = 0
     total_test = 0
-    classifier.eval() # Set classifier to evaluation mode
+    classifier.eval()
     with torch.no_grad():
         for inputs, labels in testloader:
             inputs, labels = inputs.to(DEVICE), labels.to(DEVICE)
             _, hidden_features = rbm.sample_h_given_v(inputs)
             outputs = classifier(hidden_features)
-            _, predicted = torch.max(outputs.data, 1)
+            predicted = classifier.decode(outputs)
             total_test += labels.size(0)
             correct_test += (predicted == labels).sum().item()
     
     test_accuracy = 100 * correct_test / total_test
     print(f"Classifier Epoch [{epoch+1}/{CLASSIFIER_EPOCHS}], Test Accuracy: {test_accuracy:.2f}%")
-    classifier.train() # Back to train mode
+    classifier.train()
 
 end_time = time.time()
 print(f"Classifier training finished. Time: {end_time - start_time:.2f} seconds.")
@@ -270,7 +310,7 @@ with torch.no_grad():
         inputs, labels = inputs.to(DEVICE), labels.to(DEVICE)
         _, hidden_features = rbm.sample_h_given_v(inputs)
         outputs = classifier(hidden_features)
-        _, predicted = torch.max(outputs.data, 1)
+        predicted = classifier.decode(outputs)
         total += labels.size(0)
         correct += (predicted == labels).sum().item()
 

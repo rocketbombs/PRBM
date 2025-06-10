@@ -49,4 +49,5 @@ Key hyperparameters can be adjusted at the top of the script:
         RBM_LEARNING_RATE: Learning rate for the RBM training.
     Classifier:
         CLASSIFIER_EPOCHS: Number of training epochs for the classifier.
+        CLASSIFIER_BATCH_SIZE: Batch size used during classifier training.
         CLASSIFIER_LEARNING_RATE: Learning rate for the classifier training.

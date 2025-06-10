@@ -93,8 +93,15 @@ class RBM(nn.Module):
         # Specifically, it's <v_k h_k>_model
         # v_k is vn_sample from the last step.
         # h_k_activation is P(h|v_k) using vn_sample.
-        _, vk_model_activation = self.sample_v_given_h(hn_sample) # This is v_k
-        _, hk_model_activation = self.sample_h_given_v(vk_model_activation) # P(h|v_k)
+        # Get the visible sample from the last Gibbs step and its activation
+        vk_sample, vk_activation = self.sample_v_given_h(hn_sample)
+        # Compute the hidden activations given that visible sample
+        _, hk_model_activation = self.sample_h_given_v(vk_sample)  # P(h|v_k)
+
+        # We return the activation for v_k (not the binary sample) along with
+        # the hidden activation. The caller uses these for the gradient
+        # estimates in Contrastive Divergence.
+        vk_model_activation = vk_activation
         
         return v0, h0_sample, vk_model_activation, hk_model_activation
 
